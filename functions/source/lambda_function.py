@@ -3,6 +3,7 @@ import requests
 import meraki
 import boto3
 import botocore
+import botocore.exceptions
 import logging
 import json
 import sys
@@ -113,62 +114,59 @@ def update_tgw_rt(vpn_routes, tgw_rt_id, tgw_attach_id):
     ec2 = boto3.client('ec2', region_name=region)
     uniq_vpn_routes = list(set(vpn_routes))
     logger.info("EC2 TGW Route Update {0}".format(uniq_vpn_routes))
-    #Checking if the route already exsists, if so skip updating the TGW route table
+    # Checking if the route already exists, if so skip updating the TGW route table
     for route in uniq_vpn_routes:
-        exsisting_route = ec2.search_transit_gateway_routes(
-            TransitGatewayRouteTableId= tgw_rt_id,
+        existing_route = ec2.search_transit_gateway_routes(
+            TransitGatewayRouteTableId=tgw_rt_id,
             Filters=[
-                { 'Name': 'route-search.exact-match',
-                  'Values': [route]
-
-            }]
+                {
+                    'Name': 'route-search.exact-match',
+                    'Values': [route]
+                }
+            ]
         )
-        if bool(exsisting_route['Routes']):
-            logger.info("Transit Gateway RT: No update, route {0} exsists, skipping update".format(route))
-            pass
+        if bool(existing_route['Routes']):
+            logger.info("Transit Gateway RT: No update, route {0} exists, skipping update".format(route))
         else:
             logger.info("Transit Gateway RT: New route, adding route {0}".format(route))
             ec2.create_transit_gateway_route(
-            DestinationCidrBlock= route,
-            TransitGatewayRouteTableId=tgw_rt_id,
-            TransitGatewayAttachmentId=tgw_attach_id
-           )
+                DestinationCidrBlock=route,
+                TransitGatewayRouteTableId=tgw_rt_id,
+                TransitGatewayAttachmentId=tgw_attach_id
+            )
 
 def update_vpc_rt(vpn_routes, vmx_id, rt_id):
     region = os.environ['AWS_REGION']
     ec2 = boto3.client('ec2', region_name=region)
     uniq_vpn_routes = list(set(vpn_routes))
-    #Checking exsisting routes in the VPC table
-    raw_exsisting_vpc_rts = ec2.describe_route_tables(Filters = [{"Name": "route-table-id", "Values": [rt_id]}])['RouteTables'][0]['Routes']
-    exsisting_routes = []
-    for routes in raw_exsisting_vpc_rts:
-        if 'InstanceId' in routes and routes['InstanceId'] == vmx_id:
-            exsisting_routes.append(routes['DestinationCidrBlock'])
+    # Checking existing routes in the VPC table
+    existing_vpc_rts = ec2.describe_route_tables(
+        Filters=[{"Name": "route-table-id", "Values": [rt_id]}]
+    )['RouteTables'][0]['Routes']
+    existing_routes = []
+    for route in existing_vpc_rts:
+        if 'InstanceId' in route and route['InstanceId'] == vmx_id:
+            existing_routes.append(route['DestinationCidrBlock'])
         else:
             logger.info('VPC RT: No matching routes found')
-    #Compare exsisting routes with new routes
-    update_routes = [x for x in exsisting_routes + uniq_vpn_routes if x not in exsisting_routes]
-    if update_routes:
-        logger.info('VPC RT: New routes for update {0}'.format(update_routes))
-        for routes in update_routes:
+    # Compare existing routes with new routes
+    new_routes = [x for x in uniq_vpn_routes if x not in existing_routes]
+    if new_routes:
+        logger.info('VPC RT: New routes for update {0}'.format(new_routes))
+        for route in new_routes:
             try:
                 ec2.create_route(
-                DestinationCidrBlock=routes,
-                InstanceId=vmx_id,
-                RouteTableId=rt_id
-              )
-            except botocore.exceptions.ClientError as error:
-                if error.response['Error']['Code'] == 'RouteAlreadyExists':
-                    ec2.replace_route(
-                    DestinationCidrBlock=routes,
+                    DestinationCidrBlock=route,
                     InstanceId=vmx_id,
                     RouteTableId=rt_id
                 )
+            except botocore.exceptions.ClientError as error:
+                if error.response['Error']['Code'] == 'RouteAlreadyExists':
+                    logger.info("VPC RT: Route {0} already exists, skipping creation".format(route))
                 else:
-                    logger.info('VPC RT: Boto exception, adding routes to vpc table failed due to {0}'.format(error.response['Error']['Code'])) 
+                    logger.info('VPC RT: Boto exception, adding routes to VPC table failed due to {0}'.format(error.response['Error']['Code']))
     else:
-        logger.info('VPC RT: No new routes for update') 
-
+        logger.info('VPC RT: No new routes for update')
 def get_ec2_instance_id(instance_tag):
     region = os.environ['AWS_REGION']
     ec2 = boto3.client('ec2', region_name=region)
